@@ -69,43 +69,43 @@ export class NeuralNetwork {
    * @returns {Float32Array} outputs
    */
   predict(inputs) {
-    const act0 = this.activations[0];
-    const inCount = this.inputNodes;
-    for (let i = 0; i < inCount; i++) {
-      act0[i] = inputs[i] || 0;
-    }
-
     const numLayersMinus1 = this.numLayers - 1;
 
     for (let l = 0; l < numLayersMinus1; l++) {
-      const current = this.activations[l];
+      const current = (l === 0) ? inputs : this.activations[l];
       const next = this.activations[l + 1];
       const outSize = this.layerSizes[l + 1];
       const inSize = this.layerSizes[l];
       const weightsLayer = this.weights[l];
       const biasesLayer = this.biases[l];
-      const isLastLayer = (l === numLayersMinus1 - 1);
 
-      for (let j = 0; j < outSize; j++) {
-        let sum = biasesLayer[j];
-        const row = weightsLayer[j];
+      if (l === numLayersMinus1 - 1 && outSize === 3) {
+        // Fast unrolled 3-output layer with single-pass memory reads
+        const row0 = weightsLayer[0], row1 = weightsLayer[1], row2 = weightsLayer[2];
+        let sum0 = biasesLayer[0], sum1 = biasesLayer[1], sum2 = biasesLayer[2];
         for (let i = 0; i < inSize; i++) {
-          sum += row[i] * current[i];
+          const c = current[i];
+          sum0 += row0[i] * c;
+          sum1 += row1[i] * c;
+          sum2 += row2[i] * c;
         }
-
-        if (!isLastLayer) {
-          next[j] = Math.tanh(sum);
-        } else {
-          if (j === 2) {
-            next[j] = 1 / (1 + Math.exp(-sum)); // Drift sigmoid
-          } else {
-            next[j] = Math.tanh(sum); // Throttle & Steer tanh
+        next[0] = Math.tanh(sum0);
+        next[1] = Math.tanh(sum1);
+        next[2] = 1 / (1 + Math.exp(-sum2)); // Drift sigmoid
+      } else {
+        // Fast hidden layer
+        for (let j = 0; j < outSize; j++) {
+          let sum = biasesLayer[j];
+          const row = weightsLayer[j];
+          for (let i = 0; i < inSize; i++) {
+            sum += row[i] * current[i];
           }
+          next[j] = Math.tanh(sum);
         }
       }
     }
 
-    return this.activations[this.numLayers - 1];
+    return this.activations[numLayersMinus1];
   }
 
   /**

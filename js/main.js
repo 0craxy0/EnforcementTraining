@@ -281,7 +281,19 @@ class App {
       this.showToast(this.hasObstacles ? "⚠️ Dynamic hazard pylons active" : "Hazard pylons cleared");
     });
 
-    // 10. AI Model Benchmark Presets
+    // 10. AI Model Benchmark Presets & Swarm Sync
+    const btnSyncSmartest = document.getElementById('btn-sync-smartest');
+    if (btnSyncSmartest) {
+      btnSyncSmartest.addEventListener('click', () => {
+        const res = this.ga.syncSwarmToSmartest({ respawn: true });
+        if (res) {
+          this.showToast(`⚡ Swarm synchronized to Smartest AI (${res.source})!`);
+        } else {
+          this.showToast("No trained AI leader found yet");
+        }
+      });
+    }
+
     document.getElementById('preset-master').addEventListener('click', () => {
       const masterBrain = BrainPresets.getApexHunter();
       this.ga.loadBrain(masterBrain);
@@ -402,6 +414,15 @@ class App {
         document.getElementById('btn-fit-view').click();
       }
 
+      // 'S': Sync Swarm to Smartest (when Human racer is not using S for braking)
+      if ((e.key === 's' || e.key === 'S') && !e.ctrlKey && !e.altKey && !e.metaKey) {
+        if (!this.ga.humanDriveEnabled) {
+          const btnSync = document.getElementById('btn-sync-smartest');
+          if (btnSync) btnSync.click();
+          e.preventDefault();
+        }
+      }
+
       // Human Driving Keys (WASD / Arrows)
       if (e.code === 'KeyW' || e.code === 'ArrowUp') this.humanKeys.up = true;
       if (e.code === 'KeyS' || e.code === 'ArrowDown') this.humanKeys.down = true;
@@ -510,6 +531,12 @@ class App {
     const bestLapTime = this.lastStats.bestLapTime;
     dom.statBestLap.textContent =
       (bestLapTime && bestLapTime !== Infinity) ? `${bestLapTime.toFixed(2)}s` : '--:--';
+
+    // Auto-breakthrough sync notification
+    if (this.ga.lastBreakthroughSync && !this.ga.lastBreakthroughSync.notified) {
+      this.ga.lastBreakthroughSync.notified = true;
+      this.showToast(`⚡ Breakthrough! Swarm auto-synced to Smartest AI (${this.ga.lastBreakthroughSync.ratio}x Fitness)`);
+    }
 
     // Right Sidebar Leader HUD
     const leader = this.ga.currentLeader;

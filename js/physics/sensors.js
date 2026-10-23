@@ -68,17 +68,13 @@ export class SensorArray {
       const maxY = originY > endY ? originY : endY;
 
       if (spatialIndex) {
-        // Fast spatial query: tests only 5-30 candidate segments instead of 600+
-        spatialIndex.query(minX, minY, maxX, maxY, (seg) => {
-          if (fastIntersect(originX, originY, endX, endY, seg.a.x, seg.a.y, seg.b.x, seg.b.y, scratch)) {
-            if (scratch.dist < minDistance) {
-              minDistance = scratch.dist;
-              hitX = scratch.x;
-              hitY = scratch.y;
-              hasHit = true;
-            }
-          }
-        });
+        // Fast direct raycast: 0 heap allocations, early-distance pruning
+        if (spatialIndex.castRay(originX, originY, endX, endY, this.rayLength, scratch)) {
+          minDistance = scratch.dist;
+          hitX = scratch.x;
+          hitY = scratch.y;
+          hasHit = true;
+        }
       } else if (trackSegments) {
         // Fallback linear test if spatial index is missing
         const len = trackSegments.length;

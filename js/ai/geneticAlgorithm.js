@@ -30,6 +30,7 @@ export class GeneticAlgorithm {
 
     // Generation training metrics for live chart
     this.history = []; // [{ gen, maxFitness, avgFitness, laps, bestLapTime }]
+    this.lastBreakthroughSync = null;
 
     // Human player car (optional)
     this.humanCar = null;
@@ -179,7 +180,145 @@ export class GeneticAlgorithm {
   }
 
   /**
+   * Identifies the highest-performing AI across all-time records and current fleet
+   */
+  getSmartestAI() {
+    let best = null;
+    let bestFitness = -Infinity;
+
+    // Check all-time champion record
+    if (this.bestCarAllTime && this.bestCarAllTime.brain && this.bestCarAllTime.fitness > 0) {
+      best = {
+        brain: this.bestCarAllTime.brain,
+        fitness: this.bestCarAllTime.fitness,
+        source: `Champion (Gen ${this.bestCarAllTime.generation || 1})`,
+        laps: 0,
+        checkpoints: 0
+      };
+      bestFitness = this.bestCarAllTime.fitness;
+    }
+
+    // Check all cars in current population (alive or crashed)
+    for (let i = 0; i < this.population.length; i++) {
+      const car = this.population[i];
+      if (car.fitness > bestFitness) {
+        bestFitness = car.fitness;
+        best = {
+          brain: car.brain,
+          fitness: car.fitness,
+          source: `Car #${car.id}`,
+          laps: car.lapsCompleted,
+          checkpoints: car.checkpointsCrossed
+        };
+      }
+    }
+
+    // Fallback if gen 1 right at the start line
+    if (!best || !best.brain) {
+      const fallbackCar = this.currentLeader || this.population[0];
+      if (fallbackCar) {
+        best = {
+          brain: fallbackCar.brain,
+          fitness: Math.max(0, fallbackCar.fitness),
+          source: 'Fleet Leader',
+          laps: 0,
+          checkpoints: 0
+        };
+      }
+    }
+
+    return best;
+  }
+
+  /**
+   * Synchronizes the entire swarm to the smartest AI's level
+   * Eliminates inferior lines and lifts all agents up to the breakthrough performance
+   */
+  syncSwarmToSmartest(options = { respawn: true }) {
+    const smartest = this.getSmartestAI();
+    if (!smartest || !smartest.brain) return null;
+
+    // Keep all-time best updated
+    if (!this.bestCarAllTime || smartest.fitness > this.bestFitnessAllTime) {
+      this.bestFitnessAllTime = Math.max(smartest.fitness, this.bestFitnessAllTime);
+      this.bestCarAllTime = {
+        brain: smartest.brain.clone(),
+        fitness: smartest.fitness,
+        generation: this.generation
+      };
+    }
+
+    const championBrain = smartest.brain;
+    const newBrains = [];
+
+    // Breakthrough Swarm Architecture:
+    // 1. Top 20% (min 2, max 10): Exact clones of smartest AI (guaranteed preservation)
+    const exactCloneCount = Math.max(2, Math.min(10, Math.floor(this.populationSize * 0.20)));
+    for (let i = 0; i < exactCloneCount; i++) {
+      newBrains.push(championBrain.clone());
+    }
+
+    // 2. Next 55%: Fine-tuned precision variations of smartest AI
+    // Gentle mutations explore subtle micro-optimizations (braking points & apex lines)
+    const fineTunedCount = Math.floor(this.populationSize * 0.55);
+    for (let i = 0; i < fineTunedCount; i++) {
+      const brain = championBrain.clone();
+      brain.mutate(this.mutationRate * 0.35, this.mutationStrength * 0.30);
+      newBrains.push(brain);
+    }
+
+    // 3. Remaining 25%: Exploratory variants based on smartest AI foundation
+    // Moderate mutations explore alternative overtaking lines while retaining core intelligence
+    while (newBrains.length < this.populationSize) {
+      const brain = championBrain.clone();
+      brain.mutate(this.mutationRate * 0.75, this.mutationStrength * 0.55);
+      newBrains.push(brain);
+    }
+
+    // Update fleet
+    const gridPositions = TrackBuilder.getStartingGrid(this.track, this.populationSize);
+    for (let i = 0; i < this.populationSize; i++) {
+      const pos = gridPositions[i] || gridPositions[0];
+      if (this.population[i]) {
+        this.population[i].brain = newBrains[i];
+        if (options.respawn) {
+          this.population[i].reset(pos.x, pos.y, pos.angle);
+        }
+      } else {
+        const car = new Car(i, pos.x, pos.y, pos.angle, newBrains[i]);
+        this.population.push(car);
+      }
+    }
+
+    if (options.respawn) {
+      this.generationFrames = 0;
+      this.currentLeader = this.population[0];
+      this.currentLeader.isLeader = true;
+
+      // Reset human car if active
+      if (this.humanDriveEnabled && this.humanCar) {
+        const startPos = gridPositions[0];
+        this.humanCar.reset(startPos.x, startPos.y - 12, startPos.angle);
+      }
+
+      // Celebratory visual bursts at start grid
+      if (gridPositions[0]) {
+        this.particles.emitLapConfetti(gridPositions[0].x, gridPositions[0].y, 60);
+        this.particles.emitSparks(gridPositions[0].x, gridPositions[0].y, 30);
+      }
+    }
+
+    return {
+      smartestFitness: smartest.fitness,
+      source: smartest.source,
+      syncedCars: this.populationSize,
+      generation: this.generation
+    };
+  }
+
+  /**
    * Evolution process: Elitism, Selection, Crossover & Mutation
+   * Automatically detects if one AI achieved a breakthrough and synchronizes the swarm
    */
   evolveNextGeneration() {
     // Sort cars by fitness descending
@@ -195,6 +334,7 @@ export class GeneticAlgorithm {
       genLaps += this.population[i].lapsCompleted;
     }
     const avgFitness = Math.round(sumFitness / this.population.length);
+    const medianFitness = this.population[Math.floor(this.population.length / 2)].fitness;
 
     // Update all-time champion
     if (!this.bestCarAllTime || maxFitness > this.bestFitnessAllTime) {
@@ -215,34 +355,96 @@ export class GeneticAlgorithm {
       bestLapTime: this.bestLapTimeAllTime === Infinity ? null : this.bestLapTimeAllTime
     });
 
-    // Compute elite count (preserve top 10%, at least 2 cars)
-    const eliteCount = Math.max(2, Math.floor(this.populationSize * CONFIG.ELITISM_PERCENT));
+    // Detect if one AI had a major breakthrough while others lagged behind:
+    // 1. Leader fitness is significantly higher than swarm average/median (breakthrough divergence)
+    // 2. Leader finished laps while the rest crashed early
+    // 3. Current generation struggled but an all-time smart champion exists
+    const isLocalBreakthrough = (maxFitness >= 800 && (maxFitness >= avgFitness * 1.70 || maxFitness >= medianFitness * 2.2)) ||
+      (bestOfGen.lapsCompleted > 0 && avgFitness < maxFitness * 0.6);
+    const isHistoricalBreakthrough = this.bestCarAllTime && this.bestCarAllTime.fitness > 1200 && (this.bestCarAllTime.fitness >= maxFitness * 1.6);
+    const shouldBreakthroughSync = isLocalBreakthrough || isHistoricalBreakthrough;
+
     const newBrains = [];
 
-    // 1. Elitism: preserve top performers directly without mutation
-    for (let i = 0; i < eliteCount; i++) {
-      newBrains.push(this.population[i].brain.clone());
-    }
+    if (shouldBreakthroughSync) {
+      // SMART BREAKTHROUGH CONVERGENCE:
+      // Prevent stupid cars that crashed at turn 1 from diluting the breakthrough!
+      const anchorBrain = (isHistoricalBreakthrough && this.bestCarAllTime.fitness > maxFitness)
+        ? this.bestCarAllTime.brain
+        : bestOfGen.brain;
+      const anchorFitness = (isHistoricalBreakthrough && this.bestCarAllTime.fitness > maxFitness)
+        ? this.bestCarAllTime.fitness
+        : maxFitness;
 
-    // 2. Reproduction: Tournament selection + Crossover + Mutation
-    while (newBrains.length < this.populationSize) {
-      const parentA = this.tournamentSelect();
-      const parentB = this.tournamentSelect();
-
-      let childBrain;
-      if (Math.random() < 0.75) {
-        // Crossover
-        childBrain = parentA.brain.crossover(parentB.brain);
-      } else {
-        childBrain = parentA.brain.clone();
+      // Smart parent candidate pool: only agents within 65% of anchor fitness
+      const smartThreshold = anchorFitness * 0.65;
+      const smartPool = this.population.filter(c => c.fitness >= smartThreshold);
+      if (smartPool.length === 0) {
+        smartPool.push({ brain: anchorBrain, fitness: anchorFitness });
       }
 
-      // Mutate
-      childBrain.mutate(this.mutationRate, this.mutationStrength);
-      newBrains.push(childBrain);
+      // 1. Exact elite copies of the smart champion(s) (15-20% of fleet)
+      const eliteCount = Math.max(2, Math.min(8, Math.floor(this.populationSize * 0.18)));
+      for (let i = 0; i < eliteCount; i++) {
+        const sourceCandidate = smartPool[i % smartPool.length];
+        newBrains.push(sourceCandidate.brain.clone());
+      }
+
+      // 2. Precision variations from smart pool (55% of fleet)
+      const fineTunedCount = Math.floor(this.populationSize * 0.55);
+      for (let i = 0; i < fineTunedCount; i++) {
+        let brain;
+        if (smartPool.length >= 2 && Math.random() < 0.6) {
+          const pA = this.tournamentSelect(2, smartPool);
+          const pB = this.tournamentSelect(2, smartPool);
+          brain = pA.brain.crossover(pB.brain);
+        } else {
+          const parent = this.tournamentSelect(2, smartPool);
+          brain = parent.brain.clone();
+        }
+        brain.mutate(this.mutationRate * 0.4, this.mutationStrength * 0.35);
+        newBrains.push(brain);
+      }
+
+      // 3. Exploratory variants anchored on smart pool (remaining ~25%)
+      while (newBrains.length < this.populationSize) {
+        const parent = this.tournamentSelect(2, smartPool);
+        const brain = parent.brain.clone();
+        brain.mutate(this.mutationRate * 0.8, this.mutationStrength * 0.6);
+        newBrains.push(brain);
+      }
+
+      const ratio = (anchorFitness / Math.max(1, avgFitness)).toFixed(1);
+      this.lastBreakthroughSync = {
+        generation: this.generation,
+        fitness: Math.round(anchorFitness),
+        ratio,
+        notified: false
+      };
+    } else {
+      // Standard balanced evolutionary reproduction when swarm performance is uniform
+      const eliteCount = Math.max(2, Math.floor(this.populationSize * CONFIG.ELITISM_PERCENT));
+      for (let i = 0; i < eliteCount; i++) {
+        newBrains.push(this.population[i].brain.clone());
+      }
+
+      while (newBrains.length < this.populationSize) {
+        const parentA = this.tournamentSelect();
+        const parentB = this.tournamentSelect();
+
+        let childBrain;
+        if (Math.random() < 0.75) {
+          childBrain = parentA.brain.crossover(parentB.brain);
+        } else {
+          childBrain = parentA.brain.clone();
+        }
+
+        childBrain.mutate(this.mutationRate, this.mutationStrength);
+        newBrains.push(childBrain);
+      }
     }
 
-    // 3. Reset starting grid positions
+    // Reset starting grid positions
     const gridPositions = TrackBuilder.getStartingGrid(this.track, this.populationSize);
     this.population = [];
 
@@ -267,16 +469,18 @@ export class GeneticAlgorithm {
   /**
    * Tournament Selection: pick k random candidates, return the fittest
    */
-  tournamentSelect(k = CONFIG.TOURNAMENT_SIZE) {
+  tournamentSelect(k = CONFIG.TOURNAMENT_SIZE, candidatePool = null) {
+    const pool = candidatePool || this.population;
     let best = null;
-    for (let i = 0; i < k; i++) {
-      const randIdx = Math.floor(Math.random() * this.population.length);
-      const candidate = this.population[randIdx];
+    const count = Math.min(k, pool.length);
+    for (let i = 0; i < count; i++) {
+      const randIdx = Math.floor(Math.random() * pool.length);
+      const candidate = pool[randIdx];
       if (!best || candidate.fitness > best.fitness) {
         best = candidate;
       }
     }
-    return best;
+    return best || pool[0];
   }
 
   /**
@@ -300,6 +504,7 @@ export class GeneticAlgorithm {
     this.bestLapTimeAllTime = Infinity;
     this.totalLapsEver = 0;
     this.history = [];
+    this.lastBreakthroughSync = null;
     this.initPopulation();
 
     if (this.humanDriveEnabled) {

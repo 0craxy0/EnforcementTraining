@@ -127,7 +127,10 @@ export class ParticleSystem {
       p.alpha -= p.decay;
 
       if (p.alpha <= 0) {
-        this.particles.splice(i, 1);
+        const last = this.particles.pop();
+        if (i < this.particles.length) {
+          this.particles[i] = last;
+        }
       }
     }
 
@@ -170,10 +173,12 @@ export class ParticleSystem {
         ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
         ctx.fill();
       } else if (p.type === 'smoke') {
-        ctx.fillStyle = `${p.color} ${p.alpha})`;
+        ctx.globalAlpha = p.alpha;
+        ctx.fillStyle = '#c8d2e6';
         ctx.beginPath();
         ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
         ctx.fill();
+        ctx.globalAlpha = 1.0;
       } else if (p.type === 'confetti') {
         ctx.save();
         ctx.translate(p.x, p.y);

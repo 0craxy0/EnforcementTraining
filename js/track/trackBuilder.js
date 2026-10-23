@@ -68,7 +68,7 @@ export class TrackBuilder {
       const l1 = Math.hypot(d1x, d1y) || 1;
       const l2 = Math.hypot(d2x, d2y) || 1;
       const cross = (d1x / l1) * (d2y / l2) - (d1y / l1) * (d2x / l2);
-      const dot = (d1x / l1) * (d2x / l2) + (d1y / l1) * (d2x / l2);
+      const dot = (d1x / l1) * (d2x / l2) + (d1y / l1) * (d2y / l2);
       const dTheta = Math.atan2(cross, dot);
       const ds = (l1 + l2) * 0.5;
       const R = Math.abs(dTheta) > 1e-4 ? ds / Math.abs(dTheta) : 99999;
@@ -102,13 +102,21 @@ export class TrackBuilder {
 
     for (let i = 0; i < totalPoints; i++) {
       const nextIdx = (i + 1) % totalPoints;
+      const inA = innerPoints[i];
+      const inB = innerPoints[nextIdx];
       innerSegments.push({
-        a: innerPoints[i],
-        b: innerPoints[nextIdx]
+        a: inA,
+        b: inB,
+        dx: inB.x - inA.x,
+        dy: inB.y - inA.y
       });
+      const outA = outerPoints[i];
+      const outB = outerPoints[nextIdx];
       outerSegments.push({
-        a: outerPoints[i],
-        b: outerPoints[nextIdx]
+        a: outA,
+        b: outB,
+        dx: outB.x - outA.x,
+        dy: outB.y - outA.y
       });
     }
 
@@ -153,15 +161,22 @@ export class TrackBuilder {
     // 5. Compute Track Bounding Box
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
     for (let i = 0; i < totalPoints; i++) {
-      minX = Math.min(minX, innerPoints[i].x, outerPoints[i].x);
-      minY = Math.min(minY, innerPoints[i].y, outerPoints[i].y);
-      maxX = Math.max(maxX, innerPoints[i].x, outerPoints[i].x);
-      maxY = Math.max(maxY, innerPoints[i].y, outerPoints[i].y);
+      const inPt = innerPoints[i];
+      const outPt = outerPoints[i];
+      if (inPt.x < minX) minX = inPt.x;
+      if (outPt.x < minX) minX = outPt.x;
+      if (inPt.y < minY) minY = inPt.y;
+      if (outPt.y < minY) minY = outPt.y;
+      if (inPt.x > maxX) maxX = inPt.x;
+      if (outPt.x > maxX) maxX = outPt.x;
+      if (inPt.y > maxY) maxY = inPt.y;
+      if (outPt.y > maxY) maxY = outPt.y;
     }
+    const bounds = { minX, minY, maxX, maxY, width: maxX - minX, height: maxY - minY };
 
     // 6. Build High-Performance Spatial Index for Fast Raycasting & Collisions
     const spatialIndex = new SpatialSegmentIndex(90);
-    spatialIndex.build(wallSegments);
+    spatialIndex.build(wallSegments, bounds);
 
     return {
       controlPoints,

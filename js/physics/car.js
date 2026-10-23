@@ -65,15 +65,31 @@ export class Car {
     // Pre-allocated Float32Array input vector for 0-allocation neural inference
     this.inputVector = new Float32Array(CONFIG.NETWORK.INPUT_SIZE);
 
-    // Bounding polygon corners and centerline points (pre-allocated for 0 GC)
-    this.corners = [
-      { x: 0, y: 0 },
-      { x: 0, y: 0 },
-      { x: 0, y: 0 },
-      { x: 0, y: 0 },
+    // 8-Point chamfered polygon offsets matching real aerodynamic sports car chassis
+    // Eliminates phantom right-angle rectangular corners that hit walls prematurely
+    this.localOffsets = [
+      { lx: 0.90, ly: 0.50 },  // 0: Front bumper left
+      { lx: 0.45, ly: 0.82 },  // 1: Front left wheel fender
+      { lx: -0.45, ly: 0.82 }, // 2: Rear left wheel flank
+      { lx: -0.90, ly: 0.55 }, // 3: Rear bumper left
+      { lx: -0.90, ly: -0.55 },// 4: Rear bumper right
+      { lx: -0.45, ly: -0.82 },// 5: Rear right wheel flank
+      { lx: 0.45, ly: -0.82 }, // 6: Front right wheel fender
+      { lx: 0.90, ly: -0.50 }  // 7: Front bumper right
     ];
+
+    this.corners = [];
+    for (let i = 0; i < 8; i++) {
+      this.corners.push({ x: 0, y: 0 });
+    }
     this.frontCenter = { x: 0, y: 0 };
     this.rearCenter = { x: 0, y: 0 };
+    this.prevCenter = { x: 0, y: 0 };
+    this.currentCenter = { x: 0, y: 0 };
+    this.prevX = 0;
+    this.prevY = 0;
+    this.stagnantFrames = 0;
+
     this.updateCorners();
   }
 
@@ -86,6 +102,11 @@ export class Car {
     this.startAngle = angle;
     this.x = x;
     this.y = y;
+    this.prevX = x;
+    this.prevY = y;
+    this.prevCenter.x = x;
+    this.prevCenter.y = y;
+    this.stagnantFrames = 0;
     this.angle = angle;
     this.speed = 0;
     this.lateralVelocity = 0;
@@ -106,7 +127,7 @@ export class Car {
   }
 
   /**
-   * Calculate 4 polygon corners in-place (Zero heap allocations)
+   * Calculate 8 chassis polygon corners in-place (Zero heap allocations)
    */
   updateCorners() {
     const halfW = this.width * 0.5;
@@ -114,31 +135,20 @@ export class Car {
     const cos = Math.cos(this.angle);
     const sin = Math.sin(this.angle);
 
-    const cosL = cos * halfL;
-    const sinL = sin * halfL;
-    const cosW = cos * halfW;
-    const sinW = sin * halfW;
+    for (let i = 0; i < 8; i++) {
+      const off = this.localOffsets[i];
+      const px = off.lx * halfL;
+      const py = off.ly * halfW;
+      const c = this.corners[i];
+      c.x = this.x + px * cos - py * sin;
+      c.y = this.y + px * sin + py * cos;
+    }
 
-    const c0 = this.corners[0];
-    c0.x = this.x + cosL - sinW;
-    c0.y = this.y + sinL + cosW;
-
-    const c1 = this.corners[1];
-    c1.x = this.x - cosL - sinW;
-    c1.y = this.y - sinL + cosW;
-
-    const c2 = this.corners[2];
-    c2.x = this.x - cosL + sinW;
-    c2.y = this.y - sinL - cosW;
-
-    const c3 = this.corners[3];
-    c3.x = this.x + cosL + sinW;
-    c3.y = this.y + sinL - cosW;
-
-    this.frontCenter.x = this.x + cosL;
-    this.frontCenter.y = this.y + sinL;
-    this.rearCenter.x = this.x - cosL;
-    this.rearCenter.y = this.y - sinL;
+    const noseL = halfL * 0.90;
+    this.frontCenter.x = this.x + cos * noseL;
+    this.frontCenter.y = this.y + sin * noseL;
+    this.rearCenter.x = this.x - cos * noseL;
+    this.rearCenter.y = this.y - sin * noseL;
   }
 
   /**
@@ -148,7 +158,18 @@ export class Car {
     if (!this.isAlive) return;
 
     this.totalFramesAlive++;
-    this.framesSinceLastCheckpoint++;
+    // Save previous position for continuous collision & trajectory checkpoint crossing
+    this.prevX = this.x;
+    this.prevY = this.y;
+    this.prevCenter.x = this.x;
+    this.prevCenter.y = this.y;
+
+    // Track stagnation: only penalize cars that are genuinely stopped (< 0.25 px/f)
+    if (Math.abs(this.speed) < 0.25) {
+      this.stagnantFrames++;
+    } else {
+      this.stagnantFrames = Math.max(0, this.stagnantFrames - 2);
+    }
 
     // 1. Update sensors (using spatial index)
     this.sensors.update(track, obstacles);
@@ -179,11 +200,14 @@ export class Car {
     this.updateCheckpoints(track, soundEngine);
 
     // 7. Stall / Reverse Timeout check
-    if (this.framesSinceLastCheckpoint > CONFIG.STALL_TIMEOUT_FRAMES) {
-      this.isAlive = false;
-      this.isCrashed = true;
-      this.crashReason = 'Stalled / Inactive';
-      return;
+    // Human driver is never destroyed by timeouts; AI cars are only destroyed if truly trapped or lost
+    if (!this.isHuman) {
+      if (this.stagnantFrames > 220 || this.framesSinceLastCheckpoint > CONFIG.STALL_TIMEOUT_FRAMES) {
+        this.isAlive = false;
+        this.isCrashed = true;
+        this.crashReason = this.stagnantFrames > 220 ? 'Immobile / Trapped' : 'Stalled / Inactive';
+        return;
+      }
     }
 
     // 8. Update Trail (only for active leader or human car to conserve memory)
@@ -204,22 +228,20 @@ export class Car {
     let angleToCheckpoint = 0;
 
     if (nextCp) {
-      // Midpoint of next checkpoint line
-      const cpMidX = (nextCp.a.x + nextCp.b.x) * 0.5;
-      const cpMidY = (nextCp.a.y + nextCp.b.y) * 0.5;
-      const targetAngle = Math.atan2(cpMidY - this.y, cpMidX - this.x);
+      // Use precomputed checkpoint center
+      const center = nextCp.center;
+      const targetAngle = Math.atan2(center.y - this.y, center.x - this.x);
 
       // Angle difference normalized to [-1, 1]
       let diff = targetAngle - this.angle;
       while (diff > Math.PI) diff -= Math.PI * 2;
       while (diff < -Math.PI) diff += Math.PI * 2;
-      angleToCheckpoint = diff / Math.PI;
+      angleToCheckpoint = diff * 0.318309886; // 1 / Math.PI
     }
 
-    // Normalized speed [-1, 1]
-    const normSpeed = this.speed / CONFIG.CAR.MAX_SPEED;
-    // Normalized lateral drift velocity
-    const normLateral = Math.max(-1, Math.min(1, this.lateralVelocity / 3));
+    // Normalized speed [-1, 1] and lateral drift velocity
+    const normSpeed = this.speed * (1 / CONFIG.CAR.MAX_SPEED);
+    const normLateral = Math.max(-1, Math.min(1, this.lateralVelocity * 0.33333333));
 
     // Fill pre-allocated Float32Array vector (0 heap allocations)
     const vec = this.inputVector;
@@ -309,34 +331,25 @@ export class Car {
   }
 
   /**
-   * Ultra-fast Collision check using Spatial Index
+   * High-Precision Hitbox Collision check using 8-Point Chassis Polygon & Spatial Index
    */
   checkCollision(track, obstacles = []) {
-    const halfL = this.length * 0.55;
-    const minX = this.x - halfL;
-    const maxX = this.x + halfL;
-    const minY = this.y - halfL;
-    const maxY = this.y + halfL;
-
-    let collided = false;
+    const boundR = this.length * 0.52;
+    const minX = this.x - boundR;
+    const maxX = this.x + boundR;
+    const minY = this.y - boundR;
+    const maxY = this.y + boundR;
 
     if (track.spatialIndex) {
-      track.spatialIndex.query(minX, minY, maxX, maxY, (seg) => {
-        for (let c = 0; c < 4; c++) {
-          const p1 = this.corners[c];
-          const p2 = this.corners[(c + 1) % 4];
-          if (this.segmentsIntersect(p1, p2, seg.a, seg.b)) {
-            collided = true;
-            return true; // Stop early
-          }
-        }
-      });
-      if (collided) return true;
+      // Zero closure, direct 8-point polygon collision check
+      if (track.spatialIndex.checkCarCollision(this.corners, minX, minY, maxX, maxY)) {
+        return true;
+      }
     } else {
       const wallSegments = track.wallSegments || track;
-      for (let c = 0; c < 4; c++) {
+      for (let c = 0; c < 8; c++) {
         const p1 = this.corners[c];
-        const p2 = this.corners[(c + 1) % 4];
+        const p2 = this.corners[(c + 1) % 8];
         for (let s = 0; s < wallSegments.length; s++) {
           if (this.segmentsIntersect(p1, p2, wallSegments[s].a, wallSegments[s].b)) {
             return true;
@@ -345,16 +358,30 @@ export class Car {
       }
     }
 
+    // Dynamic Obstacles: Exact circular proximity test against the 8 chassis polygon edges
     if (obstacles.length > 0) {
       for (let o = 0; o < obstacles.length; o++) {
-        const obsSegs = obstacles[o].getSegments();
-        for (let c = 0; c < 4; c++) {
+        const obs = obstacles[o];
+        const r = obs.radius;
+        const rSq = r * r;
+
+        // Quick broad-phase rejection circle
+        const distCenterSq = (obs.x - this.x) * (obs.x - this.x) + (obs.y - this.y) * (obs.y - this.y);
+        if (distCenterSq > (r + boundR) * (r + boundR)) continue;
+
+        // Narrow-phase distance to each of the 8 car chassis edges
+        for (let c = 0; c < 8; c++) {
           const p1 = this.corners[c];
-          const p2 = this.corners[(c + 1) % 4];
-          for (let s = 0; s < 4; s++) {
-            if (this.segmentsIntersect(p1, p2, obsSegs[s].a, obsSegs[s].b)) {
-              return true;
-            }
+          const p2 = this.corners[(c + 1) % 8];
+          const edgeDx = p2.x - p1.x;
+          const edgeDy = p2.y - p1.y;
+          const edgeLenSq = edgeDx * edgeDx + edgeDy * edgeDy;
+          const t = Math.max(0, Math.min(1, ((obs.x - p1.x) * edgeDx + (obs.y - p1.y) * edgeDy) / (edgeLenSq || 1)));
+          const closeX = p1.x + t * edgeDx;
+          const closeY = p1.y + t * edgeDy;
+          const dSq = (obs.x - closeX) * (obs.x - closeX) + (obs.y - closeY) * (obs.y - closeY);
+          if (dSq <= rSq) {
+            return true;
           }
         }
       }
@@ -364,15 +391,21 @@ export class Car {
   }
 
   /**
-   * Helper to check 2D line segment intersection
+   * Helper to check 2D line segment intersection (Zero heap allocation, fast short-circuit)
    */
   segmentsIntersect(A, B, C, D) {
-    const ccw = (p1, p2, p3) => (p3.y - p1.y) * (p2.x - p1.x) > (p2.y - p1.y) * (p3.x - p1.x);
-    return (ccw(A, C, D) !== ccw(B, C, D)) && (ccw(A, B, C) !== ccw(A, B, D));
+    const ax = A.x, ay = A.y, bx = B.x, by = B.y;
+    const cx = C.x, cy = C.y, dx = D.x, dy = D.y;
+    const ccw1 = (dy - cy) * (ax - cx) > (dx - cx) * (ay - cy);
+    const ccw2 = (dy - cy) * (bx - cx) > (dx - cx) * (by - cy);
+    if (ccw1 === ccw2) return false;
+    const ccw3 = (by - ay) * (cx - ax) > (bx - ax) * (cy - ay);
+    const ccw4 = (by - ay) * (dx - ax) > (bx - ax) * (dy - ay);
+    return ccw3 !== ccw4;
   }
 
   /**
-   * Checkpoint crossing and lap progression logic (Zero allocations)
+   * Checkpoint crossing and lap progression logic with continuous trajectory detection
    */
   updateCheckpoints(track, soundEngine) {
     if (!track.checkpoints || track.checkpoints.length === 0) return;
@@ -380,14 +413,22 @@ export class Car {
     const nextCp = track.checkpoints[this.nextCheckpointIndex];
     if (!nextCp) return;
 
-    // Use pre-allocated front and rear center points
-    if (this.segmentsIntersect(this.rearCenter, this.frontCenter, nextCp.a, nextCp.b)) {
-      // Check forward orientation: heading should match checkpoint normal
+    // Continuous detection: test both static car body and continuous motion trajectory
+    this.currentCenter.x = this.x;
+    this.currentCenter.y = this.y;
+    const crossedByBody = this.segmentsIntersect(this.rearCenter, this.frontCenter, nextCp.a, nextCp.b);
+    const crossedByMotion = this.segmentsIntersect(this.prevCenter, this.currentCenter, nextCp.a, nextCp.b);
+
+    if (crossedByBody || crossedByMotion) {
+      // Heading check: heading or motion vector should move along checkpoint normal
       const forwardDot = Math.cos(this.angle) * nextCp.normal.x + Math.sin(this.angle) * nextCp.normal.y;
-      if (forwardDot > 0.1) {
+      const motionDot = (this.x - this.prevX) * nextCp.normal.x + (this.y - this.prevY) * nextCp.normal.y;
+
+      if (forwardDot > -0.25 || motionDot > 0) {
         // Successfully passed checkpoint!
         this.checkpointsCrossed++;
         this.framesSinceLastCheckpoint = 0;
+        this.stagnantFrames = 0;
 
         // Advance next checkpoint index
         const prevIndex = this.nextCheckpointIndex;
