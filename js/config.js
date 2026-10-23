@@ -7,7 +7,7 @@ export const CONFIG = {
   DEFAULT_SPEED_MULTIPLIER: 1,
   MAX_SPEED_MULTIPLIER: 10,
   GENERATION_TIMEOUT_SECONDS: 50, // Auto-terminate generation if stuck
-  STALL_TIMEOUT_FRAMES: 240, // Kill car if it makes no forward progress in ~4s
+  STALL_TIMEOUT_FRAMES: 500, // Kill car if it makes no forward progress in ~8.3s
 
   // Population & Evolution Defaults
   DEFAULT_POPULATION_SIZE: 40,
