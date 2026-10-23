@@ -62,18 +62,37 @@ export class TrackBuilder {
       const ny = dx;
       normals.push({ x: nx, y: ny });
 
-      const halfW = curr.width * 0.5;
+      // Curvature radius R to prevent swallowtail self-intersections in tight corners
+      const d1x = curr.x - prev.x, d1y = curr.y - prev.y;
+      const d2x = next.x - curr.x, d2y = next.y - curr.y;
+      const l1 = Math.hypot(d1x, d1y) || 1;
+      const l2 = Math.hypot(d2x, d2y) || 1;
+      const cross = (d1x / l1) * (d2y / l2) - (d1y / l1) * (d2x / l2);
+      const dot = (d1x / l1) * (d2x / l2) + (d1y / l1) * (d2x / l2);
+      const dTheta = Math.atan2(cross, dot);
+      const ds = (l1 + l2) * 0.5;
+      const R = Math.abs(dTheta) > 1e-4 ? ds / Math.abs(dTheta) : 99999;
+
+      let halfWInner = curr.width * 0.5;
+      let halfWOuter = curr.width * 0.5;
+
+      // On the concave side of sharp corners, safely clamp offset to prevent inverted wall spikes
+      if (dTheta > 0) {
+        halfWInner = Math.min(halfWInner, R * 0.75);
+      } else if (dTheta < 0) {
+        halfWOuter = Math.min(halfWOuter, R * 0.75);
+      }
 
       // Inner boundary (left)
       innerPoints.push({
-        x: curr.x + nx * halfW,
-        y: curr.y + ny * halfW
+        x: curr.x + nx * halfWInner,
+        y: curr.y + ny * halfWInner
       });
 
       // Outer boundary (right)
       outerPoints.push({
-        x: curr.x - nx * halfW,
-        y: curr.y - ny * halfW
+        x: curr.x - nx * halfWOuter,
+        y: curr.y - ny * halfWOuter
       });
     }
 
